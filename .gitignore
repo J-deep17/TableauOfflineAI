@@ -1,0 +1,38 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# PyInstaller / Build outputs
+build/
+dist/
+app/
+*.manifest
+
+# Installer / Packaging
+*.pkg
+
+# Logs
+*.log
+TableauOfflineAI_error.log
+
+# Virtual Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
