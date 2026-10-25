@@ -303,8 +303,18 @@ def clean_dataframe(
                     data_df[col] = pd.to_numeric(cleaned_num, errors="coerce")
                     converted_numeric.append(col)
 
-    if converted_numeric:
-        log.append(f"Parsed numeric values (currency/commas) in: {', '.join(converted_numeric[:6])}.")
+    # Step 7: Auto-derive business metrics if missing
+    # E.g. When a table has quantity and unit price, but lacks a Total Sales/Revenue column
+    has_sales_col = any(
+        re.search(r"\b(sales|revenue|total_amount|total_sales|total_bill|line_total|amount)\b", re.sub(r"[^a-z0-9]", " ", str(c).lower()))
+        for c in data_df.columns
+    )
+    if not has_sales_col:
+        qty_col = next((c for c in data_df.columns if pd.api.types.is_numeric_dtype(data_df[c]) and re.search(r"\b(qty|quantity|units|unit_count)\b", re.sub(r"[^a-z0-9]", " ", str(c).lower()))), None)
+        price_col = next((c for c in data_df.columns if pd.api.types.is_numeric_dtype(data_df[c]) and re.search(r"\b(unit_price|price|rate|cost)\b", re.sub(r"[^a-z0-9]", " ", str(c).lower()))), None)
+        if qty_col and price_col and qty_col != price_col:
+            data_df["Total Sales"] = (data_df[qty_col].fillna(0) * data_df[price_col].fillna(0)).round(2)
+            log.append(f"Auto-calculated 'Total Sales' from '{qty_col}' * '{price_col}' for accurate financial analysis.")
 
     final_rows, final_cols_count = data_df.shape
     log.append(f"Result: {final_rows:,} rows and {final_cols_count} columns ready.")
