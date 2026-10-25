@@ -352,6 +352,16 @@ def configure_exam_tags(text_widget: Any) -> None:
     text_widget.tag_configure("result_box", font=("Segoe UI", 10), foreground="#0f172a",
                               background="#f8fafc", lmargin1=14, lmargin2=14, spacing1=4, spacing3=4)
 
+    # Chat Transcript Tags
+    text_widget.tag_configure("chat_user_hdr", font=("Segoe UI", 10, "bold"), foreground="#1e40af",
+                              background="#eff6ff", spacing1=10, spacing3=2, lmargin1=8, lmargin2=8)
+    text_widget.tag_configure("chat_user_msg", font=("Segoe UI", 11), foreground="#0f172a",
+                              background="#f8fafc", lmargin1=14, lmargin2=14, spacing1=2, spacing3=6)
+    text_widget.tag_configure("chat_bot_hdr", font=("Segoe UI", 10, "bold"), foreground="#065f46",
+                              background="#ecfdf5", spacing1=10, spacing3=2, lmargin1=8, lmargin2=8)
+    text_widget.tag_configure("chat_divider", font=("Segoe UI", 9), foreground="#cbd5e1",
+                              spacing1=6, spacing3=6)
+
 
 def _tokenize_inline_text(text: str) -> List[Tuple[str, str]]:
     """Parse text into tokens: bold, field, shelf, arrow, or plain text."""
@@ -379,16 +389,39 @@ def _tokenize_inline_text(text: str) -> List[Tuple[str, str]]:
     return tokens
 
 
-def render_exam_answer(text_widget: Any, raw_markdown: str) -> None:
-    """Parse raw markdown from AI and render a clean, professional exam cheat-sheet view."""
+def append_user_message(text_widget: Any, query: str, timestamp: str = "") -> None:
+    """Append a styled user query bubble to the chat transcript."""
+    configure_exam_tags(text_widget)
     text_widget.config(state="normal")
-    text_widget.delete("1.0", "end")
+    time_str = f" [{timestamp}]" if timestamp else ""
+    text_widget.insert("end", f"\n💬  You{time_str}:\n", ("chat_user_hdr",))
+    text_widget.insert("end", f"  {query.strip()}\n\n", ("chat_user_msg",))
+    text_widget.config(state="disabled")
+    text_widget.see("end")
+
+
+def append_assistant_message(text_widget: Any, raw_markdown: str) -> None:
+    """Append a styled assistant answer to the chat transcript."""
+    configure_exam_tags(text_widget)
+    text_widget.config(state="normal")
+    text_widget.insert("end", "🎓  Tableau Exam Helper:\n", ("chat_bot_hdr",))
+    render_exam_answer(text_widget, raw_markdown, clear=False)
+    text_widget.config(state="normal")
+    text_widget.insert("end", "\n" + "─" * 70 + "\n", ("chat_divider",))
+    text_widget.config(state="disabled")
+    text_widget.see("end")
+
+
+def render_exam_answer(text_widget: Any, raw_markdown: str, clear: bool = True) -> None:
+    """Parse raw markdown from AI and render a clean, professional exam cheat-sheet view."""
+    configure_exam_tags(text_widget)
+    text_widget.config(state="normal")
+    if clear:
+        text_widget.delete("1.0", "end")
 
     if not raw_markdown or not raw_markdown.strip():
         text_widget.config(state="disabled")
         return
-
-    configure_exam_tags(text_widget)
 
     lines = raw_markdown.strip().splitlines()
     cur_section = ""
@@ -542,37 +575,90 @@ def extract_steps(raw_markdown: str) -> str:
 
 
 def extract_formula(raw_markdown: str) -> str:
-    """Extract the calculated field formula if one was provided in the answer."""
+    """Extract calculated field formula from markdown, handling multiline, code blocks, or backticks."""
+    if not raw_markdown or not raw_markdown.strip():
+        return ""
+
+    lines = raw_markdown.splitlines()
+
+    # 1. Look for explicit CALCULATED FIELD / FORMULA section first
     in_calc = False
     in_code = False
-    cur_code: List[str] = []
+    calc_code_lines: List[str] = []
+    calc_formula_lines: List[str] = []
+    capturing_formula = False
 
-    for line in raw_markdown.splitlines():
-        line_s = line.strip()
-        if "CALCULATED FIELD" in line_s.upper():
+    for line in lines:
+        raw = line.strip()
+        header_norm = raw.lstrip("#").strip().upper()
+        is_calc_header = (raw.startswith("#") and ("CALC" in header_norm or "FORMULA" in header_norm)) or header_norm in ("CALCULATED FIELD", "CALCULATED FIELD:")
+        if is_calc_header:
             in_calc = True
+            capturing_formula = False
             continue
         if in_calc:
-            if line_s.startswith("###") or "EXAM TIP" in line_s.upper():
+            if (raw.startswith("#") and not is_calc_header) or (raw and header_norm in ("EXAM TIP", "EXAM TIP:", "STEPS", "STEPS:", "RESULT", "FINAL RESULT")):
                 break
-            if line_s.startswith("```"):
+            # Skip "Not required"
+            if any(w in raw.lower() for w in ("not required", "not needed", "none")):
+                return ""
+            if raw.startswith("```"):
                 if in_code:
-                    return "\n".join(cur_code).strip()
+                    return "\n".join(calc_code_lines).strip()
                 in_code = True
                 continue
             if in_code:
-                cur_code.append(line)
-            elif line_s.lower().startswith("formula:"):
-                part = line_s.split(":", 1)[1].strip()
-                if part and not part.startswith("`"):
+                calc_code_lines.append(line)
+                continue
+
+            # Look for "Formula: ..." or "Formula:\n..."
+            if raw.lower().startswith("formula:"):
+                part = raw.split(":", 1)[1].strip().strip("`")
+                if part and not any(w in part.lower() for w in ("not required", "none")):
                     return part
+                capturing_formula = True
+                continue
+            elif capturing_formula:
+                if raw and not raw.lower().startswith("step") and not raw.startswith("#"):
+                    clean = raw.strip("`")
+                    if clean:
+                        calc_formula_lines.append(clean)
+                else:
+                    capturing_formula = False
 
-    if cur_code:
-        return "\n".join(cur_code).strip()
+    if calc_code_lines:
+        return "\n".join(calc_code_lines).strip()
+    if calc_formula_lines:
+        return "\n".join(calc_formula_lines).strip()
 
-    # Search for inline backticked formula if no code block
-    m = re.search(r"Formula:\s*`([^`]+)`", raw_markdown, re.IGNORECASE)
+    # 2. Search for any fenced code block containing Tableau functions or syntax
+    code_blocks = re.findall(r"```(?:tableau|sql)?\s*([\s\S]*?)\s*```", raw_markdown, re.IGNORECASE)
+    for block in code_blocks:
+        b_str = block.strip()
+        if any(w in b_str.upper() for w in (
+            "SUM(", "AVG(", "COUNTD(", "FIXED", "INCLUDE", "EXCLUDE", "IF ", "CASE ",
+            "ZN(", "DATEDIFF(", "DATEPART(", "RANK(", "WINDOW_", "ATTR(", "LOOKUP("
+        )):
+            return b_str
+
+    # 3. Search for inline Formula: `...` or Formula: ... (horizontal whitespace only)
+    m = re.search(r"(?:\bFormula\b|\bCalculation\b):[^\S\r\n]*`([^`]+)`", raw_markdown, re.IGNORECASE)
     if m:
-        return m.group(1).strip()
+        res = m.group(1).strip()
+        res = re.sub(r"^(?:Formula|Calculation|Calculated Field):\s*", "", res, flags=re.IGNORECASE).strip()
+        if res and not any(w in res.lower() for w in ("not required", "none", "n/a")):
+            return res
+
+    m = re.search(r"(?:\bFormula\b|\bCalculation\b):[^\S\r\n]*([^\r\n]+)", raw_markdown, re.IGNORECASE)
+    if m:
+        res = m.group(1).strip().strip("`'\"")
+        res = re.sub(r"^(?:Formula|Calculation|Calculated Field):\s*", "", res, flags=re.IGNORECASE).strip()
+        if res and not any(w in res.lower() for w in ("not required", "none", "n/a")):
+            return res
+
+    # 4. If any code block exists at all, return the first one
+    if code_blocks:
+        return code_blocks[0].strip()
 
     return ""
+

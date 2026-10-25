@@ -92,8 +92,7 @@ class App(tk.Tk):
         self.stopped = False
         self.last_facts = ""
         self.cfg = load_cfg()
-        self.ai_schema_guide = ""
-        self.rule_schema_guide = ""
+        self.chat_history = []
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._drain)
@@ -158,10 +157,7 @@ class App(tk.Tk):
         nb.add(f, text="1. Data model")
         top = ttk.Frame(f)
         top.pack(fill="x")
-        self.btn_ai_schema = ttk.Button(top, text="🤖 Generate Schema & Logic (AI)", command=self.generate_schema)
-        self.btn_ai_schema.pack(side="left")
-        self.btn_rule_schema = ttk.Button(top, text="⚡ Fast Rule-Based Schema", command=self.generate_rule_schema)
-        self.btn_rule_schema.pack(side="left", padx=4)
+        ttk.Button(top, text="Generate schema & drag guide", command=self.generate_schema).pack(side="left")
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
         ttk.Button(top, text="Fit to Screen", command=self.fit_to_screen).pack(side="left", padx=2)
         ttk.Button(top, text="Zoom In (+)", width=11, command=self.zoom_in).pack(side="left", padx=2)
@@ -195,73 +191,108 @@ class App(tk.Tk):
         self.guide_txt.pack(fill="both", expand=True)
         bf = ttk.Frame(gf)
         bf.pack(fill="x", pady=(6, 0))
-        ttk.Button(bf, text="📋 Copy Guide", command=lambda: self._copy(self.guide_txt.get("1.0", "end").strip())).pack(side="left")
-        ttk.Button(bf, text="💾 Save Guide...", command=lambda: self._save_text(self.guide_txt.get("1.0", "end"), "tableau_schema_guide.txt")).pack(side="left", padx=4)
-        ttk.Button(bf, text="🤖 Run AI Schema", command=self.generate_schema).pack(side="left", padx=4)
-        ttk.Button(bf, text="⚡ View Rule-Based Guide", command=self.show_rule_guide).pack(side="left", padx=4)
+        ttk.Button(bf, text="Copy guide", command=lambda: self._copy(self.guide_txt.get("1.0", "end").strip())).pack(side="left")
+        ttk.Button(bf, text="Save guide...", command=lambda: self._save_text(self.guide_txt.get("1.0", "end"), "tableau_guide.txt")).pack(side="left", padx=6)
 
     def _tab_ask(self, nb):
         f = ttk.Frame(nb, padding=10)
-        nb.add(f, text="2. Ask question")
+        nb.add(f, text="2. Ask & Chat Assistant")
 
+        # Top Header Bar with Clear Conversation & Save Chat
+        top_bar = ttk.Frame(f)
+        top_bar.pack(fill="x", pady=(0, 4))
         ttk.Label(
-            f,
-            text="Type your Tableau exam question. Verified numbers are computed first; step-by-step drag-and-drop actions appear below.",
+            top_bar,
+            text="Ask an exam question, or continue chatting if you are stuck anywhere on a step, formula, or filter.",
             foreground="#475569", font=("Segoe UI", 10)
-        ).pack(anchor="w")
+        ).pack(side="left")
 
-        # Question text box with Ctrl+Enter shortcut
-        self.q_txt = tk.Text(f, height=3, wrap="word", font=("Segoe UI", 11), padx=8, pady=6)
-        self.q_txt.pack(fill="x", pady=(6, 6))
+        ttk.Button(top_bar, text="🗑️ Clear Conversation", command=self.clear_chat).pack(side="right")
+        ttk.Button(top_bar, text="💾 Save Chat...", command=self.save_chat).pack(side="right", padx=6)
+        ttk.Button(top_bar, text="🔍 Show Verified Facts", command=self.show_facts).pack(side="right", padx=6)
+
+        # Central Chat Transcript Window
+        chat_frame = ttk.LabelFrame(f, text="Exam Conversation & Guide", padding=6)
+        chat_frame.pack(fill="both", expand=True, pady=(2, 4))
+
+        text_cont = ttk.Frame(chat_frame)
+        text_cont.pack(fill="both", expand=True)
+
+        self.ans_txt = tk.Text(
+            text_cont, wrap="word", font=("Segoe UI", 10), state="disabled",
+            background="#ffffff", foreground="#1e293b", relief="flat", padx=12, pady=10
+        )
+        exam_formatter.configure_exam_tags(self.ans_txt)
+        ans_sb = ttk.Scrollbar(text_cont, orient="vertical", command=self.ans_txt.yview)
+        self.ans_txt.configure(yscrollcommand=ans_sb.set)
+        ans_sb.pack(side="right", fill="y")
+        self.ans_txt.pack(side="left", fill="both", expand=True)
+
+        # Initial greeting in chat transcript
+        self.ans_txt.config(state="normal")
+        self.ans_txt.insert("end", "👋 Welcome to Tableau Exam Helper!\n\n", ("h_task",))
+        self.ans_txt.insert(
+            "end",
+            "Type your practical exam task below to get verified fields, shelves, steps, and expected results.\n"
+            "If you are stuck on any step or get an error in Tableau, ask follow-up questions to continue chatting.\n"
+            "Use '🗑️ Clear Conversation' whenever you want to begin a fresh task.\n\n"
+            + "─" * 70 + "\n",
+            ("base",)
+        )
+        self.ans_txt.config(state="disabled")
+
+        # Chat Action / Quick-Copy Bar
+        copy_bar = ttk.Frame(chat_frame)
+        copy_bar.pack(fill="x", pady=(4, 2))
+        ttk.Button(copy_bar, text="📋 Copy Latest Answer", command=lambda: self._copy(self._answer_text())).pack(side="left")
+        ttk.Button(copy_bar, text="🔢 Copy Steps Only", command=self._copy_steps).pack(side="left", padx=4)
+        ttk.Button(copy_bar, text="🧮 Copy Formula", command=self._copy_formula).pack(side="left", padx=4)
+        self.check_lbl = ttk.Label(copy_bar, text="", wraplength=550, font=("Segoe UI", 9))
+        self.check_lbl.pack(side="right", padx=4)
+
+        # Quick Follow-Up Chips (when student is stuck)
+        chips_frame = ttk.Frame(f)
+        chips_frame.pack(fill="x", pady=(2, 4))
+        ttk.Label(chips_frame, text="Stuck? Quick follow-up:", foreground="#64748b", font=("Segoe UI", 9, "italic")).pack(side="left", padx=(0, 6))
+
+        quick_prompts = [
+            ("Where to drag?", "Where exactly do I drag each field on the Tableau canvas?"),
+            ("Show Formula", "What is the exact Calculated Field formula for this task?"),
+            ("Fix Error", "I got an error in Tableau while following these steps. How do I fix it?"),
+            ("Explain Details", "Can you explain the steps and shelf selections in more detail?"),
+        ]
+        for label, q_text in quick_prompts:
+            ttk.Button(
+                chips_frame, text=label,
+                command=lambda qt=q_text: self._send_quick_prompt(qt)
+            ).pack(side="left", padx=2)
+
+        # Bottom Input Area
+        in_frame = ttk.Frame(f)
+        in_frame.pack(fill="x", pady=(2, 0))
+
+        self.q_txt = tk.Text(in_frame, height=3, wrap="word", font=("Segoe UI", 11), padx=8, pady=6)
+        self.q_txt.pack(fill="x", pady=(2, 4))
         self.q_txt.bind("<Control-Return>", lambda _e: self.solve())
 
-        # Action bar
-        row = ttk.Frame(f)
-        row.pack(fill="x", pady=(0, 4))
-        self.solve_btn = ttk.Button(row, text="⚡ Solve Exam Task", command=self.solve)
+        btn_row = ttk.Frame(in_frame)
+        btn_row.pack(fill="x")
+        self.solve_btn = ttk.Button(btn_row, text="⚡ Send Question / Follow-up", command=self.solve)
         self.solve_btn.pack(side="left")
-        self.stop_btn = ttk.Button(row, text="Stop", command=self.stop, state="disabled")
+        self.stop_btn = ttk.Button(btn_row, text="Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
-        ttk.Label(row, text="(Press Ctrl+Enter to solve)", foreground="#64748b", font=("Segoe UI", 9)).pack(side="left", padx=8)
+        ttk.Label(btn_row, text="(Press Ctrl+Enter to send)", foreground="#64748b", font=("Segoe UI", 9)).pack(side="left", padx=8)
 
         # Progress indicator and status bar
-        self.pbar = ttk.Progressbar(f, maximum=1000, mode="determinate")
-        self.pbar.pack(fill="x", pady=(6, 2))
+        self.pbar = ttk.Progressbar(in_frame, maximum=1000, mode="determinate")
+        self.pbar.pack(fill="x", pady=(4, 2))
 
-        stat_row = ttk.Frame(f)
+        stat_row = ttk.Frame(in_frame)
         stat_row.pack(fill="x")
         self.status_lbl = ttk.Label(stat_row, text="Ready.", foreground="#333", font=("Segoe UI", 10, "bold"))
         self.status_lbl.pack(side="left")
         self.metrics_lbl = ttk.Label(stat_row, text="", foreground="#64748b", font=("Segoe UI", 9))
         self.metrics_lbl.pack(side="right")
-
-        # Exam Solution Guide container (Scrolled Text widget with modern tags)
-        af = ttk.LabelFrame(f, text="Exam Solution Guide", padding=6)
-        af.pack(fill="both", expand=True, pady=(6, 4))
-
-        ans_frame = ttk.Frame(af)
-        ans_frame.pack(fill="both", expand=True)
-
-        self.ans_txt = tk.Text(
-            ans_frame, wrap="word", font=("Segoe UI", 10), state="disabled",
-            background="#ffffff", foreground="#1e293b", relief="flat", padx=12, pady=10
-        )
-        ans_sb = ttk.Scrollbar(ans_frame, orient="vertical", command=self.ans_txt.yview)
-        self.ans_txt.configure(yscrollcommand=ans_sb.set)
-        ans_sb.pack(side="right", fill="y")
-        self.ans_txt.pack(side="left", fill="both", expand=True)
-
-        self.check_lbl = ttk.Label(af, text="", wraplength=850, font=("Segoe UI", 9))
-        self.check_lbl.pack(anchor="w", pady=(4, 0))
-
-        # Bottom Button Bar: Copy Full Answer, Copy Steps Only, Copy Formula, Save, Facts
-        bf = ttk.Frame(af)
-        bf.pack(fill="x", pady=(6, 2))
-        ttk.Button(bf, text="📋 Copy Full Answer", command=lambda: self._copy(self._answer_text())).pack(side="left")
-        ttk.Button(bf, text="⚡ Copy Steps Only", command=self._copy_steps).pack(side="left", padx=4)
-        ttk.Button(bf, text="🧮 Copy Formula", command=self._copy_formula).pack(side="left", padx=4)
-        ttk.Button(bf, text="💾 Save Guide...", command=lambda: self._save_text(self._answer_text(), "tableau_exam_guide.txt")).pack(side="left", padx=4)
-        ttk.Button(bf, text="🔍 Show Exact Facts sent to AI", command=self.show_facts).pack(side="right")
 
     def _tab_settings(self, nb):
         f = ttk.Frame(nb, padding=14)
@@ -458,72 +489,162 @@ class App(tk.Tk):
         self.cf_status_lbl.config(text=f"Dataset Compatibility: {status_badge}", foreground=fg)
 
     def _copy_selected_formula(self):
+        formula = ""
+        name = "Formula"
         sel = self.cheat_tv.selection()
-        if not sel:
-            return
-        idx = int(sel[0])
-        formula = exam_formatter.FORMULAS[idx]["formula"]
-        self._copy(formula)
-        self.status_lbl.config(text=f"Copied '{exam_formatter.FORMULAS[idx]['name']}' formula to clipboard.", foreground="#15803d")
+        if sel:
+            idx = int(sel[0])
+            formula = exam_formatter.FORMULAS[idx]["formula"]
+            name = exam_formatter.FORMULAS[idx]["name"]
+        elif hasattr(self, "cf_box"):
+            formula = self.cf_box.get("1.0", "end").strip()
+
+        if formula:
+            self._copy(formula)
+            self.status_lbl.config(text=f"Copied '{name}' formula to clipboard.", foreground="#15803d")
+        else:
+            messagebox.showinfo(APP_NAME, "Select a formula in the table first.")
 
     def _copy_formula_with_steps(self):
+        item = None
         sel = self.cheat_tv.selection()
-        if not sel:
-            return
-        idx = int(sel[0])
-        item = exam_formatter.FORMULAS[idx]
-        text = (
-            f"FIELD NAME: {item['name']}\n\n"
-            f"FORMULA:\n{item['formula']}\n\n"
-            "STEPS IN TABLEAU:\n"
-            "1. Right-click anywhere in the Data pane.\n"
-            "2. Select Create Calculated Field.\n"
-            f"3. Enter the field name: {item['name']}\n"
-            f"4. Paste the formula:\n{item['formula']}\n"
-            "5. Click OK.\n"
-            "6. Drag the new field into the appropriate shelf (Rows, Columns, Marks, etc.).\n"
-        )
-        if item.get("compute_using"):
-            text += f"\nTABLE CALCULATION CONFIGURATION:\n• {item['compute_using']}\n"
-        self._copy(text)
-        self.status_lbl.config(text=f"Copied '{item['name']}' with step-by-step instructions.", foreground="#15803d")
+        if sel:
+            idx = int(sel[0])
+            item = exam_formatter.FORMULAS[idx]
+
+        if item:
+            text = (
+                f"FIELD NAME: {item['name']}\n\n"
+                f"FORMULA:\n{item['formula']}\n\n"
+                "STEPS IN TABLEAU:\n"
+                "1. Right-click anywhere in the Data pane.\n"
+                "2. Select Create Calculated Field.\n"
+                f"3. Enter the field name: {item['name']}\n"
+                f"4. Paste the formula:\n{item['formula']}\n"
+                "5. Click OK.\n"
+                "6. Drag the new field into the appropriate shelf (Rows, Columns, Marks, etc.).\n"
+            )
+            if item.get("compute_using"):
+                text += f"\nTABLE CALCULATION CONFIGURATION:\n• {item['compute_using']}\n"
+            self._copy(text)
+            self.status_lbl.config(text=f"Copied '{item['name']}' with step-by-step instructions.", foreground="#15803d")
+        elif hasattr(self, "cf_box") and self.cf_box.get("1.0", "end").strip():
+            self._copy(self.cf_box.get("1.0", "end").strip())
+        else:
+            messagebox.showinfo(APP_NAME, "Select a formula in the table first.")
 
     # ------------------------------------------------------------------ helpers
     def _copy(self, text):
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.status_lbl.config(text="Copied to clipboard.")
+        if not text:
+            return
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update_idletasks()
+            self.update()  # Critical for Windows Tkinter clipboard commit
+            self.status_lbl.config(text="Copied to clipboard.", foreground="#15803d")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _save_text(self, text, default):
         path = filedialog.asksaveasfilename(defaultextension=".txt", initialfile=default,
-                                            filetypes=[("Text", "*.txt"), ("All files", "*.*")])
+                                            filetypes=[("Text", "*.txt"), ("Markdown", "*.md"), ("All files", "*.*")])
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(text)
 
     def _answer_text(self):
-        raw = getattr(self, "raw_answer", "")
-        return exam_formatter.extract_clean_text(raw) or self.ans_txt.get("1.0", "end").strip()
+        # Extract plain text of the latest assistant response
+        raw = ""
+        if hasattr(self, "chat_history") and self.chat_history:
+            for m in reversed(self.chat_history):
+                if m.get("role") == "assistant":
+                    raw = m.get("content", "")
+                    break
+        if not raw:
+            raw = getattr(self, "raw_answer", "")
+        clean = exam_formatter.extract_clean_text(raw)
+        return clean or self.ans_txt.get("1.0", "end").strip()
 
     def _set_answer(self, text):
         self.raw_answer = text
-        exam_formatter.render_exam_answer(self.ans_txt, text)
+        exam_formatter.render_exam_answer(self.ans_txt, text, clear=True)
 
     def _copy_steps(self):
-        steps = exam_formatter.extract_steps(getattr(self, "raw_answer", ""))
+        raw = ""
+        if hasattr(self, "chat_history") and self.chat_history:
+            for m in reversed(self.chat_history):
+                if m.get("role") == "assistant":
+                    raw = m.get("content", "")
+                    break
+        if not raw:
+            raw = getattr(self, "raw_answer", "")
+
+        steps = exam_formatter.extract_steps(raw)
         if steps:
             self._copy(steps)
             self.status_lbl.config(text=f"Copied {len(steps.splitlines())} steps to clipboard.", foreground="#15803d")
         else:
-            messagebox.showinfo(APP_NAME, "No numbered steps found in the answer yet.")
+            messagebox.showinfo(APP_NAME, "No numbered steps found in the latest answer yet.")
 
     def _copy_formula(self):
-        formula = exam_formatter.extract_formula(getattr(self, "raw_answer", ""))
+        # 1. If user highlighted any text in the chatbox, copy it directly
+        try:
+            sel = self.ans_txt.get("sel.first", "sel.last").strip()
+            if sel:
+                self._copy(sel)
+                self.status_lbl.config(text="Copied highlighted text to clipboard.", foreground="#15803d")
+                return
+        except tk.TclError:
+            pass
+
+        # 2. Extract formula from the latest assistant response
+        raw = ""
+        if hasattr(self, "chat_history") and self.chat_history:
+            for m in reversed(self.chat_history):
+                if m.get("role") == "assistant":
+                    raw = m.get("content", "")
+                    break
+        if not raw:
+            raw = getattr(self, "raw_answer", "")
+
+        formula = exam_formatter.extract_formula(raw)
         if formula:
             self._copy(formula)
-            self.status_lbl.config(text="Copied calculated field formula to clipboard.", foreground="#15803d")
+            self.status_lbl.config(text=f"Copied formula to clipboard: {formula[:35]}...", foreground="#15803d")
         else:
-            messagebox.showinfo(APP_NAME, "No calculated field formula in this answer (or not required).")
+            messagebox.showinfo(
+                APP_NAME,
+                "No calculated field formula found in the latest answer (or not required).\n\n"
+                "Tip: You can highlight any formula or text in the chat and click 'Copy Formula' to copy it."
+            )
+
+    def clear_chat(self):
+        """Reset conversation history so user can start a completely fresh exam task."""
+        self.chat_history = []
+        self.raw_answer = ""
+        self.last_facts = ""
+        self.ans_txt.config(state="normal")
+        self.ans_txt.delete("1.0", "end")
+        self.ans_txt.insert("end", "👋 Conversation cleared.\nType a new exam task below to begin.\n\n" + "─" * 70 + "\n", ("base",))
+        self.ans_txt.config(state="disabled")
+        self.check_lbl.config(text="")
+        self.metrics_lbl.config(text="")
+        self.status_lbl.config(text="Conversation cleared. Ready for new task.", foreground="#15803d")
+
+    def save_chat(self):
+        """Export full conversation transcript to a text or markdown file."""
+        text = self.ans_txt.get("1.0", "end").strip()
+        if not text:
+            messagebox.showinfo(APP_NAME, "Conversation is empty.")
+            return
+        self._save_text(text, "tableau_exam_chat.md")
+
+    def _send_quick_prompt(self, text):
+        """Clickable quick chip: populate question box and send immediately."""
+        self.q_txt.delete("1.0", "end")
+        self.q_txt.insert("1.0", text)
+        self.solve()
 
     def _on_table_select(self, _event=None):
         sel_tables = self.selected_tables()
@@ -626,8 +747,8 @@ class App(tk.Tk):
         if sel_tables:
             self._auto_model(sel_tables)
             self.model_lbl.config(
-                text=f"{len(sel_tables)} table(s) loaded. Click '🤖 Generate Schema & Logic (AI)' to analyze with AI model.",
-                foreground="#1d4ed8"
+                text=f"{len(sel_tables)} table(s) loaded. Relationships mapped automatically.",
+                foreground="#15803d"
             )
         self._refresh_cheats()
 
@@ -766,126 +887,21 @@ class App(tk.Tk):
         return self.model_cache["pairs"], self.model_cache["tree"]
 
     def generate_schema(self):
-        """Send opened files to local AI model and generate the correct Tableau schema with business logic."""
+        """Generate schema and copyable drag guide instantly from opened files using deterministic rules."""
         tables = self.selected_tables()
         if not tables:
             messagebox.showinfo(APP_NAME, "Add files and select at least one table first.")
             return
-        self._save_cfg()
-        cfg = dict(self.cfg)
-        if hasattr(self, "btn_ai_schema"):
-            self.btn_ai_schema.config(state="disabled")
-        self.model_lbl.config(text=f"🤖 Step 1/3 - Profiling {len(tables)} opened table(s)...", foreground="#1d4ed8")
-
-        def work():
-            try:
-                # 1. Quick rule-based pass to obtain baseline profiles and hints
-                pairs, base_tree = self._ensure_model(tables)
-                analysis = self.model_cache.get("analysis", {})
-
-                # 2. Package prompt from all opened files
-                self.post(lambda: self.model_lbl.config(
-                    text=f"🤖 Step 2/3 - Sending opened files to AI ({cfg.get('base_url', 'LM Studio')})...",
-                    foreground="#1d4ed8"
-                ))
-                prompt = llm.build_schema_prompt(tables, analysis)
-                messages = [
-                    {"role": "system", "content": llm.SCHEMA_SYSTEM},
-                    {"role": "user", "content": prompt}
-                ]
-
-                # 3. Model detection
-                model = llm.choose_model(cfg["base_url"], cfg["api_key"], cfg["model"])
-                self.post(lambda: self.model_lbl.config(
-                    text=f"🤖 Step 3/3 - AI ({model}) analyzing schema & business logic...",
-                    foreground="#1d4ed8"
-                ))
-
-                # 4. Stream from AI model
-                limit = max(cfg.get("max_tokens", 1800), 2500)
-                state = llm.start(messages, cfg["base_url"], cfg["api_key"], model, limit, cfg["timeout"])
-                while not state["done"]:
-                    toks = state["tokens"]
-                    el = time.time() - state["t_start"]
-                    self.post(lambda t=toks, e=el: self.model_lbl.config(
-                        text=f"🤖 AI generating schema & business logic ({t} tokens, {e:.0f}s)...",
-                        foreground="#1d4ed8"
-                    ))
-                    time.sleep(0.3)
-
-                if state["error"]:
-                    raise RuntimeError(state["error"])
-
-                ai_text = state["content"].strip()
-                if not ai_text:
-                    raise RuntimeError("AI model returned an empty response. Try raising Max output tokens in Settings.")
-
-                # 5. Extract structured relationships from AI response
-                ai_tree = llm.extract_schema_model(ai_text, tables)
-                final_tree = ai_tree if ai_tree else base_tree
-
-                # 6. Apply to UI
-                def on_done():
-                    if hasattr(self, "btn_ai_schema"):
-                        self.btn_ai_schema.config(state="normal")
-                    self.ai_schema_guide = ai_text
-                    self._show_model(tables, pairs, final_tree, custom_guide=ai_text)
-                    if ai_tree:
-                        note = f"✓ AI Schema applied ({len(ai_tree)} relationships via {model})"
-                    else:
-                        note = f"✓ AI Business Logic generated via {model}"
-                    self.model_lbl.config(text=note, foreground="#15803d")
-
-                self.post(on_done)
-
-            except Exception as e:
-                err_msg = str(e)
-                # Graceful fallback to rule-based schema
-                def on_fail():
-                    if hasattr(self, "btn_ai_schema"):
-                        self.btn_ai_schema.config(state="normal")
-                    try:
-                        pairs, base_tree = self._ensure_model(tables)
-                        self._show_model(tables, pairs, base_tree)
-                    except Exception:  # noqa: BLE001
-                        pass
-                    low = err_msg.lower()
-                    if "connection" in low or "refused" in low or "http" in low:
-                        note = "LM Studio not running on localhost:1234 — rule-based schema generated. (Start LM Studio for AI logic)."
-                    else:
-                        note = f"AI Schema note: {err_msg[:120]} (Showing rule-based schema)."
-                    self.model_lbl.config(text=note, foreground="#b45309")
-
-                self.post(on_fail)
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def generate_rule_schema(self):
-        """Build instant rule-based schema and relationship graph without calling the LLM."""
-        tables = self.selected_tables()
-        if not tables:
-            messagebox.showinfo(APP_NAME, "Add files and select at least one table first.")
-            return
-        self.model_lbl.config(text="Building rule-based schema...", foreground="#555")
-
-        def work():
-            try:
-                pairs, tree = self._ensure_model(tables)
-                self.post(lambda: self._show_model(tables, pairs, tree))
-                self.post(lambda: self.model_lbl.config(text=f"Rule-based schema: {len(tree)} relationship(s) found.", foreground="#15803d"))
-            except Exception as e:  # noqa: BLE001
-                msg = str(e)
-                self.post(lambda: self.model_lbl.config(text=f"Problem: {msg}", foreground="#b00020"))
-        threading.Thread(target=work, daemon=True).start()
-
-    def show_rule_guide(self):
-        """Switch drag guide back to the rule-based guide text."""
-        if hasattr(self, "rule_schema_guide") and self.rule_schema_guide:
-            self.guide_txt.delete("1.0", "end")
-            self.guide_txt.insert("1.0", self.rule_schema_guide)
-            self.model_lbl.config(text="Showing rule-based schema guide.", foreground="#555")
-        else:
-            messagebox.showinfo(APP_NAME, "No rule-based guide generated yet.")
+        self.model_lbl.config(text="Building schema & drag guide...", foreground="#555")
+        try:
+            pairs, tree = self._ensure_model(tables)
+            self._show_model(tables, pairs, tree)
+            self.model_lbl.config(
+                text=f"✓ Schema ready: {len(tree)} relationship(s) mapped.",
+                foreground="#15803d"
+            )
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror(APP_NAME, f"Could not generate schema:\n{e}")
 
     # ------------------------------------------------------------------ zoom & view controls
     def fit_to_screen(self):
@@ -966,14 +982,12 @@ class App(tk.Tk):
         if self.is_fit_mode and self.current_model and self.current_model[0]:
             self.after_idle(self.fit_to_screen)
 
-    def _show_model(self, tables, pairs, tree, custom_guide=None):
+    def _show_model(self, tables, pairs, tree):
         self.current_model = (tables, tree)
         analysis = self.model_cache.get("analysis", {})
         disconnected = analysis.get("disconnected", {})
         junction_tables = analysis.get("junction_tables", {})
-        rule_guide = engine.guide_text(tree, disconnected, junction_tables) if len(tables) > 1 else "Only one table selected. No relationship is needed."
-        self.rule_schema_guide = rule_guide
-        guide = custom_guide if custom_guide else (self.ai_schema_guide if self.ai_schema_guide else rule_guide)
+        guide = engine.guide_text(tree, disconnected, junction_tables) if len(tables) > 1 else "Only one table selected. No relationship is needed."
         self.guide_txt.delete("1.0", "end")
         self.guide_txt.insert("1.0", guide)
 
@@ -1213,17 +1227,22 @@ class App(tk.Tk):
             messagebox.showinfo(APP_NAME, "Add files and select at least one table first.")
             return
         if not question:
-            messagebox.showinfo(APP_NAME, "Type the question first.")
+            messagebox.showinfo(APP_NAME, "Type the question or follow-up first.")
             return
         self._save_cfg()
         cfg = dict(self.cfg)
         self.solve_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.stopped = False
-        self._set_answer("")
+
+        # Clear input box and append user message to chat transcript
+        self.q_txt.delete("1.0", "end")
+        ts = time.strftime("%H:%M")
+        exam_formatter.append_user_message(self.ans_txt, question, ts)
+
         self.check_lbl.config(text="")
         self.metrics_lbl.config(text="")
-        self._set_progress(0.02, "Starting...")
+        self._set_progress(0.02, "Thinking...")
         threading.Thread(target=self._solve_worker, args=(question, tables, cfg), daemon=True).start()
 
     def stop(self):
@@ -1243,17 +1262,34 @@ class App(tk.Tk):
 
     def _solve_worker(self, question, tables, cfg):
         try:
-            self.post(lambda: self._set_progress(0.05, "Step 1/4 - Checking the table relationships..."))
-            _pairs, tree = self._ensure_model(tables)
-            self.post(lambda: self._set_progress(0.10, "Step 2/4 - Computing exact numbers from your data..."))
-            facts, notes = engine.build_facts(tables, tree, question, max_chars=cfg["facts_budget"])
-            self.last_facts = facts
-            prompt = llm.build_prompt(question, facts)
-            messages = [{"role": "system", "content": llm.SYSTEM}, {"role": "user", "content": prompt}]
-            ptoks = int((len(llm.SYSTEM) + len(prompt)) / 3.5)
-            self.post(lambda: self._set_progress(0.15, f"Step 3/4 - Connecting to LM Studio (prompt about {ptoks:,} tokens)..."))
+            is_new_conv = len(self.chat_history) == 0
+            if is_new_conv:
+                self.post(lambda: self._set_progress(0.05, "Step 1/4 - Checking the table relationships..."))
+                _pairs, tree = self._ensure_model(tables)
+                self.post(lambda: self._set_progress(0.10, "Step 2/4 - Computing exact numbers from your data..."))
+                facts, notes = engine.build_facts(tables, tree, question, max_chars=cfg["facts_budget"])
+                self.last_facts = facts
+                user_content = llm.build_prompt(question, facts)
+            else:
+                self.post(lambda: self._set_progress(0.10, "Step 1/2 - Continuing exam conversation..."))
+                facts = self.last_facts
+                notes = []
+                user_content = (
+                    f"{question}\n\n"
+                    "Remember: Keep the response direct, concise, and focused on helping the student complete the practical exam task in Tableau."
+                )
+
+            # Assemble conversation message history
+            messages = [{"role": "system", "content": llm.SYSTEM}]
+            for turn in self.chat_history:
+                messages.append({"role": turn["role"], "content": turn["content"]})
+            messages.append({"role": "user", "content": user_content})
+
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            ptoks = int(total_chars / 3.5)
+            self.post(lambda: self._set_progress(0.15, f"Connecting to LM Studio (prompt about {ptoks:,} tokens)..."))
             model = llm.choose_model(cfg["base_url"], cfg["api_key"], cfg["model"])
-            self.post(lambda: self._set_progress(0.18, f"Step 4/4 - Asking {model}..."))
+            self.post(lambda: self._set_progress(0.18, f"Asking {model}..."))
             limit = cfg["max_tokens"]
             state = self._run_stream(messages, cfg, model, limit, ptoks)
             if (not self.stopped and not state["error"] and not state["content"].strip()
@@ -1286,7 +1322,7 @@ class App(tk.Tk):
         self._finish_ui()
         self._set_progress(0, "Failed.")
         self.status_lbl.config(foreground="#b00020")
-        self._set_answer(msg)
+        exam_formatter.append_assistant_message(self.ans_txt, f"⚠️ Error: {msg}")
 
     def _show_result(self, state, facts, notes, question, model):
         self._finish_ui()
@@ -1298,7 +1334,7 @@ class App(tk.Tk):
         answer = state["content"].strip()
         if self.stopped and not answer:
             self._set_progress(0, "Stopped.")
-            self._set_answer("Stopped.")
+            exam_formatter.append_assistant_message(self.ans_txt, "⏹️ Request stopped.")
             return
         if not answer:
             self._show_error("The model returned no answer text. Raise 'Max output tokens' in Settings (reasoning models need 1500+).")
@@ -1308,7 +1344,13 @@ class App(tk.Tk):
         gen = end - (state["t_first"] or state["t_start"])
         tps = f"{state['tokens'] / gen:.1f} tok/s" if gen > 0.5 else "n/a"
         self.metrics_lbl.config(text=f"Total {total:.1f}s - first token after {first:.1f}s - {state['tokens']:,} tokens - {tps} - model {model}")
-        self._set_answer(answer)
+
+        # Update chat transcript and conversation history
+        self.raw_answer = answer
+        self.chat_history.append({"role": "user", "content": question})
+        self.chat_history.append({"role": "assistant", "content": answer})
+        exam_formatter.append_assistant_message(self.ans_txt, answer)
+
         bad = engine.unverified_numbers(answer, facts, question)
         if bad:
             self.check_lbl.config(foreground="#b00020", text="Check these numbers, they are not in the verified data: "

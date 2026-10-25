@@ -90,7 +90,10 @@ SYSTEM = (
     "4. Never suggest a calculated field when standard Tableau operations (drag, sort, Quick Table Calc, Top N filter) suffice.\n"
     "5. If question asks for Top N: specify Drag [Dimension] -> Filters -> Top tab -> By Field: Top N by [Measure].\n"
     "6. If question asks for distinct count: specify COUNTD([Field]), NOT COUNT([Field]).\n"
-    "7. If a calculated field is not needed, you MUST write 'Not required.' under CALCULATED FIELD.\n"
+    "7. If a calculated field is not needed, you MUST write 'Not required.' under CALCULATED FIELD.\n\n"
+    "FOR FOLLOW-UP QUESTIONS (when the student asks a clarification or is stuck):\n"
+    "Directly, clearly, and concisely answer the student's question based on the ongoing exam task.\n"
+    "Tell them exactly what to click, which shelf to check, how to correct their formula error, or how to resolve their issue.\n"
 )
 
 

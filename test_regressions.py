@@ -192,6 +192,64 @@ class TestRegressions(unittest.TestCase):
         self.assertEqual(llm.extract_schema_model("No schema here", tables), [])
         self.assertEqual(llm.extract_schema_model("```json\n{not a list}\n```", tables), [])
 
+    def test_formula_extraction_fallbacks(self):
+        import exam_formatter
+        # Case 1: Plain formula line without code block or backticks
+        txt1 = "Here is the calculation:\nFormula: SUM([Profit]) / SUM([Sales])\nDone."
+        self.assertEqual(exam_formatter.extract_formula(txt1), "SUM([Profit]) / SUM([Sales])")
+
+        # Case 2: Multiline formula in CALCULATED FIELD section without backticks
+        txt2 = (
+            "### CALCULATED FIELD\n"
+            "Field Name: Customer Category\n"
+            "Formula:\n"
+            "IF SUM([Sales]) > 1000 THEN 'High'\n"
+            "ELSE 'Low'\n"
+            "END\n\n"
+            "### EXAM TIP\nPlace on Rows."
+        )
+        self.assertEqual(
+            exam_formatter.extract_formula(txt2),
+            "IF SUM([Sales]) > 1000 THEN 'High'\nELSE 'Low'\nEND"
+        )
+
+        # Case 3: Fenced code block without section headers (typical in follow-up chat)
+        txt3 = (
+            "Sure! Here is the formula you need to copy into Tableau:\n\n"
+            "```\n"
+            "{ FIXED [Region] : AVG([Sales]) }\n"
+            "```\n\n"
+            "This fixes the level of detail."
+        )
+        self.assertEqual(
+            exam_formatter.extract_formula(txt3),
+            "{ FIXED [Region] : AVG([Sales]) }"
+        )
+
+    def test_chat_formatting_and_clear(self):
+        import tkinter as tk
+        import exam_formatter
+        root = tk.Tk()
+        root.withdraw()
+        txt = tk.Text(root)
+        exam_formatter.configure_exam_tags(txt)
+
+        # Append user message
+        exam_formatter.append_user_message(txt, "How do I do Top 10 Customers?", "12:00")
+        content1 = txt.get("1.0", "end")
+        self.assertIn("You [12:00]:", content1)
+        self.assertIn("How do I do Top 10 Customers?", content1)
+
+        # Append assistant response
+        exam_formatter.append_assistant_message(txt, "### TASK\nShow Top 10 Customers.\n\n### STEPS\n1. Drag Customer Name to Rows.")
+        content2 = txt.get("1.0", "end")
+        self.assertIn("Tableau Exam Helper:", content2)
+        self.assertIn("Show Top 10 Customers", content2)
+        self.assertIn("1. Drag Customer Name to", content2)
+        self.assertIn("Rows", content2)
+
+        root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
