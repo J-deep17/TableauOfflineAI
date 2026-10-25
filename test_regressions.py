@@ -77,6 +77,60 @@ class TestRegressions(unittest.TestCase):
         b = pd.DataFrame({"First Name": list("abcd"), "City": list("wxyz"), "Score": [1, 2, 3, 4]})
         self.assertEqual(R.detect_all_relationships({"A": a, "B": b})["tree"], [])
 
+    def test_exam_formatter_catalog_and_validation(self):
+        import exam_formatter
+        self.assertGreater(len(exam_formatter.FORMULAS), 15)
+        # Check formula fields validation
+        active = {"Sales", "Order Date", "Customer ID"}
+        pm = next(f for f in exam_formatter.FORMULAS if f["name"] == "Profit Margin %")
+        code, label = exam_formatter.validate_formula_fields(pm, active)
+        self.assertEqual(code, "missing")
+        self.assertIn("Profit", label)
+
+        rk = next(f for f in exam_formatter.FORMULAS if "Rank" in f["name"])
+        code, label = exam_formatter.validate_formula_fields(rk, active)
+        self.assertEqual(code, "table_calc")
+        self.assertIn("Compute Using", label)
+
+    def test_exam_formatter_steps_and_formula_extraction(self):
+        import exam_formatter
+        sample = (
+            "### QUESTION\nTop 5 cities\n\n"
+            "### FIELDS TO USE\n* Dimension: `City`\n* Measure: `Sales` (SUM)\n\n"
+            "### STEP-BY-STEP SOLUTION\n"
+            "1. Drag `City` -> Rows.\n"
+            "2. Drag `Sales` -> Columns.\n"
+            "3. Set Marks to Bar.\n\n"
+            "### FINAL RESULT\n5 cities ranked.\n\n"
+            "### CALCULATED FIELD\n"
+            "Field Name: Ratio\n"
+            "Formula:\n```tableau\nSUM([Profit]) / SUM([Sales])\n```\n"
+            "Steps:\n1. Create calc field.\n\n"
+            "### EXAM TIP\nRemember to sort."
+        )
+        steps = exam_formatter.extract_steps(sample)
+        self.assertIn("1. Drag City", steps)
+        self.assertIn("2. Drag Sales", steps)
+        self.assertIn("3. Set Marks to Bar", steps)
+
+        f_txt = exam_formatter.extract_formula(sample)
+        self.assertEqual(f_txt, "SUM([Profit]) / SUM([Sales])")
+
+        clean = exam_formatter.extract_clean_text(sample)
+        self.assertNotIn("###", clean)
+        self.assertNotIn("```", clean)
+
+    def test_llm_prompt_structure(self):
+        import llm
+        p = llm.build_prompt("What is total sales?", "Sales facts")
+        self.assertIn("### QUESTION", p)
+        self.assertIn("### FIELDS TO USE", p)
+        self.assertIn("### STEP-BY-STEP SOLUTION", p)
+        self.assertIn("### FINAL RESULT", p)
+        self.assertIn("### CALCULATED FIELD", p)
+        self.assertIn("### EXAM TIP", p)
+
 
 if __name__ == "__main__":
     unittest.main()
+

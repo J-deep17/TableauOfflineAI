@@ -23,6 +23,7 @@ except ImportError:
 import pandas as pd
 
 import engine
+import exam_formatter
 import llm
 import loader
 
@@ -46,22 +47,8 @@ DEFAULT_CFG = {
     "timeout": 300,
 }
 
-FORMULAS = [
-    ("Sum", "SUM([Sales])", "Total of a measure."),
-    ("Average", "AVG([Gross Profit])", "Arithmetic mean."),
-    ("Count rows", "COUNT([Order ID])", "Counts non-null values; not unique."),
-    ("Distinct count", "COUNTD([Customer ID])", "Counts unique values."),
-    ("Profit margin", "SUM([Gross Profit]) / SUM([Sales])", "Format as percentage."),
-    ("Percent of total", "SUM([Sales]) / TOTAL(SUM([Sales]))", "Table calc; set Compute Using."),
-    ("Sales vs target", "SUM([Sales]) / MIN([Target])", "Division on Rows; Target is one value per division."),
-    ("Fixed LOD", "{ FIXED [Division] : SUM([Sales]) }", "Aggregate at a chosen level."),
-    ("Month date", "DATETRUNC('month', [Order Date])", "Start of month."),
-    ("Rank", "RANK(SUM([Sales]))", "Table calc; configure Compute Using."),
-    ("Running total", "RUNNING_SUM(SUM([Sales]))", "Table calc."),
-    ("Null replacement", "IFNULL([Category], 'Unknown')", "Replaces null values."),
-    ("Conditional label", "IF SUM([Sales]) >= 1000 THEN 'High' ELSE 'Low' END", "Replace threshold."),
-    ("Zip as number", "INT([Postal Code])", "Relationship calculation for zip matching."),
-]
+FORMULAS = exam_formatter.FORMULAS
+
 
 
 def load_cfg():
@@ -144,6 +131,7 @@ class App(tk.Tk):
         self.tbl_list = tk.Listbox(left, selectmode=tk.EXTENDED, exportselection=False, width=30, height=18,
                                    font=("Segoe UI", 10))
         self.tbl_list.pack(fill="both", expand=True)
+        self.tbl_list.bind("<<ListboxSelect>>", self._on_table_select)
         ttk.Button(left, text="Add files...", command=self.add_files).pack(fill="x", pady=(8, 2))
         ttk.Button(left, text="Preview selected", command=self.preview).pack(fill="x", pady=2)
         ttk.Button(left, text="Cleaning log...", command=self.show_cleaning_log).pack(fill="x", pady=2)
@@ -160,6 +148,8 @@ class App(tk.Tk):
         self._tab_ask(nb)
         self._tab_settings(nb)
         self._tab_cheats(nb)
+        self._refresh_cheats()
+
 
     def _tab_model(self, nb):
         f = ttk.Frame(nb, padding=8)
@@ -204,37 +194,67 @@ class App(tk.Tk):
         ttk.Button(bf, text="Save guide...", command=lambda: self._save_text(self.guide_txt.get("1.0", "end"), "tableau_guide.txt")).pack(side="left", padx=6)
 
     def _tab_ask(self, nb):
-        f = ttk.Frame(nb, padding=8)
+        f = ttk.Frame(nb, padding=10)
         nb.add(f, text="2. Ask question")
-        ttk.Label(f, text="Type the exam question only. Exact numbers are computed first; your local AI writes the short answer.",
-                  foreground="#555").pack(anchor="w")
-        self.q_txt = tk.Text(f, height=4, wrap="word", font=("Segoe UI", 11))
+
+        ttk.Label(
+            f,
+            text="Type your Tableau exam question. Verified numbers are computed first; step-by-step drag-and-drop actions appear below.",
+            foreground="#475569", font=("Segoe UI", 10)
+        ).pack(anchor="w")
+
+        # Question text box with Ctrl+Enter shortcut
+        self.q_txt = tk.Text(f, height=3, wrap="word", font=("Segoe UI", 11), padx=8, pady=6)
         self.q_txt.pack(fill="x", pady=(6, 6))
+        self.q_txt.bind("<Control-Return>", lambda _e: self.solve())
+
+        # Action bar
         row = ttk.Frame(f)
-        row.pack(fill="x")
-        self.solve_btn = ttk.Button(row, text="Find table & solve", command=self.solve)
+        row.pack(fill="x", pady=(0, 4))
+        self.solve_btn = ttk.Button(row, text="⚡ Solve Exam Task", command=self.solve)
         self.solve_btn.pack(side="left")
         self.stop_btn = ttk.Button(row, text="Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
+        ttk.Label(row, text="(Press Ctrl+Enter to solve)", foreground="#64748b", font=("Segoe UI", 9)).pack(side="left", padx=8)
 
+        # Progress indicator and status bar
         self.pbar = ttk.Progressbar(f, maximum=1000, mode="determinate")
-        self.pbar.pack(fill="x", pady=(10, 2))
-        self.status_lbl = ttk.Label(f, text="Ready.", foreground="#333")
-        self.status_lbl.pack(anchor="w")
-        self.metrics_lbl = ttk.Label(f, text="", foreground="#555")
-        self.metrics_lbl.pack(anchor="w", pady=(2, 6))
+        self.pbar.pack(fill="x", pady=(6, 2))
 
-        af = ttk.LabelFrame(f, text="Answer - concise", padding=6)
-        af.pack(fill="both", expand=True)
-        self.ans_txt = tk.Text(af, height=10, wrap="word", font=("Consolas", 12), state="disabled")
-        self.ans_txt.pack(fill="both", expand=True)
-        self.check_lbl = ttk.Label(af, text="", wraplength=800)
-        self.check_lbl.pack(anchor="w", pady=(6, 0))
+        stat_row = ttk.Frame(f)
+        stat_row.pack(fill="x")
+        self.status_lbl = ttk.Label(stat_row, text="Ready.", foreground="#333", font=("Segoe UI", 10, "bold"))
+        self.status_lbl.pack(side="left")
+        self.metrics_lbl = ttk.Label(stat_row, text="", foreground="#64748b", font=("Segoe UI", 9))
+        self.metrics_lbl.pack(side="right")
+
+        # Exam Solution Guide container (Scrolled Text widget with modern tags)
+        af = ttk.LabelFrame(f, text="Exam Solution Guide", padding=6)
+        af.pack(fill="both", expand=True, pady=(6, 4))
+
+        ans_frame = ttk.Frame(af)
+        ans_frame.pack(fill="both", expand=True)
+
+        self.ans_txt = tk.Text(
+            ans_frame, wrap="word", font=("Segoe UI", 10), state="disabled",
+            background="#ffffff", foreground="#1e293b", relief="flat", padx=12, pady=10
+        )
+        ans_sb = ttk.Scrollbar(ans_frame, orient="vertical", command=self.ans_txt.yview)
+        self.ans_txt.configure(yscrollcommand=ans_sb.set)
+        ans_sb.pack(side="right", fill="y")
+        self.ans_txt.pack(side="left", fill="both", expand=True)
+
+        self.check_lbl = ttk.Label(af, text="", wraplength=850, font=("Segoe UI", 9))
+        self.check_lbl.pack(anchor="w", pady=(4, 0))
+
+        # Bottom Button Bar: Copy Full Answer, Copy Steps Only, Copy Formula, Save, Facts
         bf = ttk.Frame(af)
-        bf.pack(fill="x", pady=(6, 0))
-        ttk.Button(bf, text="Copy answer", command=lambda: self._copy(self._answer_text())).pack(side="left")
-        ttk.Button(bf, text="Save answer...", command=lambda: self._save_text(self._answer_text(), "tableau_answer.txt")).pack(side="left", padx=6)
-        ttk.Button(bf, text="Show exact facts sent to AI", command=self.show_facts).pack(side="left")
+        bf.pack(fill="x", pady=(6, 2))
+        ttk.Button(bf, text="📋 Copy Full Answer", command=lambda: self._copy(self._answer_text())).pack(side="left")
+        ttk.Button(bf, text="⚡ Copy Steps Only", command=self._copy_steps).pack(side="left", padx=4)
+        ttk.Button(bf, text="🧮 Copy Formula", command=self._copy_formula).pack(side="left", padx=4)
+        ttk.Button(bf, text="💾 Save Guide...", command=lambda: self._save_text(self._answer_text(), "tableau_exam_guide.txt")).pack(side="left", padx=4)
+        ttk.Button(bf, text="🔍 Show Exact Facts sent to AI", command=self.show_facts).pack(side="right")
 
     def _tab_settings(self, nb):
         f = ttk.Frame(nb, padding=14)
@@ -265,22 +285,201 @@ class App(tk.Tk):
         self.conn_lbl.grid(row=len(rows) + 1, column=0, columnspan=3, sticky="w")
 
     def _tab_cheats(self, nb):
-        f = ttk.Frame(nb, padding=8)
+        f = ttk.Frame(nb, padding=10)
         nb.add(f, text="Formula cheat sheet")
-        ttk.Label(f, text="Double-click a row to copy the formula.", foreground="#555").pack(anchor="w")
-        tv = ttk.Treeview(f, columns=("name", "formula", "note"), show="headings", height=16)
-        for c, w in (("name", 160), ("formula", 440), ("note", 380)):
-            tv.heading(c, text=c.title())
-            tv.column(c, width=w, anchor="w")
-        for r in FORMULAS:
-            tv.insert("", "end", values=r)
-        tv.pack(fill="both", expand=True, pady=(6, 0))
 
-        def copy_row(_e):
-            sel = tv.selection()
-            if sel:
-                self._copy(tv.item(sel[0], "values")[1])
-        tv.bind("<Double-1>", copy_row)
+        # Top Control Bar: Search and Category Filter
+        top = ttk.Frame(f)
+        top.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(top, text="🔍 Search:", font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.cheat_search_var = tk.StringVar()
+        self.cheat_search_var.trace_add("write", lambda *_: self._refresh_cheats())
+        s_entry = ttk.Entry(top, textvariable=self.cheat_search_var, width=24)
+        s_entry.pack(side="left", padx=(4, 12))
+
+        ttk.Label(top, text="Category:", font=("Segoe UI", 10, "bold")).pack(side="left")
+        self.cheat_cat_var = tk.StringVar(value=exam_formatter.FORMULA_CATEGORIES[0])
+        cat_cb = ttk.Combobox(
+            top, textvariable=self.cheat_cat_var, values=exam_formatter.FORMULA_CATEGORIES,
+            state="readonly", width=25
+        )
+        cat_cb.pack(side="left", padx=(4, 12))
+        cat_cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh_cheats())
+
+        self.cheat_active_tbl_lbl = ttk.Label(
+            top, text="Active dataset: None", foreground="#475569", font=("Segoe UI", 9, "italic")
+        )
+        self.cheat_active_tbl_lbl.pack(side="left", padx=4)
+
+        ttk.Button(top, text="🔄 Check Active Table", command=self._refresh_cheats).pack(side="right")
+
+        # Main PanedWindow: Upper is Table, Lower is Preview & Copy Card
+        pw = ttk.PanedWindow(f, orient="vertical")
+        pw.pack(fill="both", expand=True)
+
+        # Upper Table Frame
+        tree_frame = ttk.Frame(pw)
+        pw.add(tree_frame, weight=3)
+
+        cols = ("category", "name", "formula", "status", "purpose")
+        self.cheat_tv = ttk.Treeview(tree_frame, columns=cols, show="headings", height=9)
+        self.cheat_tv.heading("category", text="Category")
+        self.cheat_tv.heading("name", text="Formula Name")
+        self.cheat_tv.heading("formula", text="Tableau Formula")
+        self.cheat_tv.heading("status", text="Dataset Status / Compute Using")
+        self.cheat_tv.heading("purpose", text="When to Use (Exam Purpose)")
+
+        self.cheat_tv.column("category", width=140, anchor="w")
+        self.cheat_tv.column("name", width=180, anchor="w")
+        self.cheat_tv.column("formula", width=280, anchor="w")
+        self.cheat_tv.column("status", width=240, anchor="w")
+        self.cheat_tv.column("purpose", width=380, anchor="w")
+
+        ysb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.cheat_tv.yview)
+        xsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.cheat_tv.xview)
+        self.cheat_tv.configure(yscrollcommand=ysb.set, xscrollcommand=xsb.set)
+
+        ysb.pack(side="right", fill="y")
+        xsb.pack(side="bottom", fill="x")
+        self.cheat_tv.pack(fill="both", expand=True)
+
+        self.cheat_tv.bind("<<TreeviewSelect>>", self._on_cheat_select)
+        self.cheat_tv.bind("<Double-1>", lambda _e: self._copy_selected_formula())
+
+        # Lower Detail & Quick-Copy Card
+        card = ttk.LabelFrame(pw, text="Selected Formula Quick-Reference & Copy", padding=8)
+        pw.add(card, weight=2)
+
+        self.cf_name_lbl = ttk.Label(
+            card, text="Select a formula above to preview details and copy.",
+            font=("Segoe UI", 11, "bold"), foreground="#0f2d59"
+        )
+        self.cf_name_lbl.pack(anchor="w")
+
+        # Large readable formula box
+        self.cf_box = tk.Text(
+            card, height=2, wrap="none", font=("Consolas", 11, "bold"),
+            background="#f8fafc", foreground="#0f172a", relief="solid", borderwidth=1, padx=8, pady=4
+        )
+        self.cf_box.pack(fill="x", pady=(4, 4))
+
+        self.cf_purpose_lbl = ttk.Label(card, text="", wraplength=950, font=("Segoe UI", 10))
+        self.cf_purpose_lbl.pack(anchor="w", pady=(0, 2))
+
+        self.cf_status_lbl = ttk.Label(card, text="", font=("Segoe UI", 10, "bold"))
+        self.cf_status_lbl.pack(anchor="w", pady=(0, 6))
+
+        c_btn_row = ttk.Frame(card)
+        c_btn_row.pack(fill="x")
+        ttk.Button(c_btn_row, text="📋 Copy Formula", command=self._copy_selected_formula).pack(side="left")
+        ttk.Button(c_btn_row, text="📋 Copy with Steps (Create Calc Field)", command=self._copy_formula_with_steps).pack(side="left", padx=8)
+        ttk.Label(
+            c_btn_row, text="Tip: Double-click any row above to immediately copy formula syntax.",
+            foreground="#64748b", font=("Segoe UI", 9)
+        ).pack(side="right")
+
+    def _refresh_cheats(self):
+        if not hasattr(self, "cheat_tv"):
+            return
+        query = self.cheat_search_var.get().strip().lower()
+        cat_filter = self.cheat_cat_var.get()
+        sel_tables = self.selected_tables()
+
+        active_cols = set()
+        active_tbl_names = list(sel_tables.keys())
+        if active_tbl_names:
+            tbl_str = ", ".join(active_tbl_names[:2])
+            self.cheat_active_tbl_lbl.config(text=f"Active Table: {tbl_str}", foreground="#15803d")
+            for df in sel_tables.values():
+                for c in df.columns:
+                    active_cols.add(str(c))
+        else:
+            self.cheat_active_tbl_lbl.config(text="Active dataset: None (Select table on left)", foreground="#64748b")
+
+        for item in self.cheat_tv.get_children():
+            self.cheat_tv.delete(item)
+
+        matched_first = None
+        for idx, item in enumerate(exam_formatter.FORMULAS):
+            if cat_filter != "All Categories" and item["category"] != cat_filter:
+                continue
+            if query:
+                full_text = f"{item['name']} {item['formula']} {item['purpose']} {item['category']}".lower()
+                if query not in full_text:
+                    continue
+
+            _status_code, status_badge = exam_formatter.validate_formula_fields(item, active_cols)
+            row_id = self.cheat_tv.insert("", "end", iid=str(idx), values=(
+                item["category"],
+                item["name"],
+                item["formula"].replace("\n", " "),
+                status_badge,
+                item["purpose"],
+            ))
+            if matched_first is None:
+                matched_first = row_id
+
+        if matched_first:
+            self.cheat_tv.selection_set(matched_first)
+            self._on_cheat_select(None)
+        else:
+            self.cf_name_lbl.config(text="No formulas matched your search/filter.")
+            self.cf_box.delete("1.0", "end")
+            self.cf_purpose_lbl.config(text="")
+            self.cf_status_lbl.config(text="")
+
+    def _on_cheat_select(self, _e):
+        sel = self.cheat_tv.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        item = exam_formatter.FORMULAS[idx]
+        sel_tables = self.selected_tables()
+        active_cols = set()
+        for df in sel_tables.values():
+            for c in df.columns:
+                active_cols.add(str(c))
+        _status_code, status_badge = exam_formatter.validate_formula_fields(item, active_cols)
+
+        self.cf_name_lbl.config(text=f"{item['name']}   [{item['category']}]")
+        self.cf_box.delete("1.0", "end")
+        self.cf_box.insert("1.0", item["formula"])
+        self.cf_purpose_lbl.config(text=f"Purpose: {item['purpose']}")
+
+        fg = "#15803d" if "✓" in status_badge else ("#b45309" if "⚠️" in status_badge else "#1d4ed8")
+        self.cf_status_lbl.config(text=f"Dataset Compatibility: {status_badge}", foreground=fg)
+
+    def _copy_selected_formula(self):
+        sel = self.cheat_tv.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        formula = exam_formatter.FORMULAS[idx]["formula"]
+        self._copy(formula)
+        self.status_lbl.config(text=f"Copied '{exam_formatter.FORMULAS[idx]['name']}' formula to clipboard.", foreground="#15803d")
+
+    def _copy_formula_with_steps(self):
+        sel = self.cheat_tv.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        item = exam_formatter.FORMULAS[idx]
+        text = (
+            f"FIELD NAME: {item['name']}\n\n"
+            f"FORMULA:\n{item['formula']}\n\n"
+            "STEPS IN TABLEAU:\n"
+            "1. Right-click anywhere in the Data pane.\n"
+            "2. Select Create Calculated Field.\n"
+            f"3. Enter the field name: {item['name']}\n"
+            f"4. Paste the formula:\n{item['formula']}\n"
+            "5. Click OK.\n"
+            "6. Drag the new field into the appropriate shelf (Rows, Columns, Marks, etc.).\n"
+        )
+        if item.get("compute_using"):
+            text += f"\nTABLE CALCULATION CONFIGURATION:\n• {item['compute_using']}\n"
+        self._copy(text)
+        self.status_lbl.config(text=f"Copied '{item['name']}' with step-by-step instructions.", foreground="#15803d")
 
     # ------------------------------------------------------------------ helpers
     def _copy(self, text):
@@ -296,13 +495,34 @@ class App(tk.Tk):
                 f.write(text)
 
     def _answer_text(self):
-        return self.ans_txt.get("1.0", "end").strip()
+        raw = getattr(self, "raw_answer", "")
+        return exam_formatter.extract_clean_text(raw) or self.ans_txt.get("1.0", "end").strip()
 
     def _set_answer(self, text):
-        self.ans_txt.config(state="normal")
-        self.ans_txt.delete("1.0", "end")
-        self.ans_txt.insert("1.0", text)
-        self.ans_txt.config(state="disabled")
+        self.raw_answer = text
+        exam_formatter.render_exam_answer(self.ans_txt, text)
+
+    def _copy_steps(self):
+        steps = exam_formatter.extract_steps(getattr(self, "raw_answer", ""))
+        if steps:
+            self._copy(steps)
+            self.status_lbl.config(text=f"Copied {len(steps.splitlines())} steps to clipboard.", foreground="#15803d")
+        else:
+            messagebox.showinfo(APP_NAME, "No numbered steps found in the answer yet.")
+
+    def _copy_formula(self):
+        formula = exam_formatter.extract_formula(getattr(self, "raw_answer", ""))
+        if formula:
+            self._copy(formula)
+            self.status_lbl.config(text="Copied calculated field formula to clipboard.", foreground="#15803d")
+        else:
+            messagebox.showinfo(APP_NAME, "No calculated field formula in this answer (or not required).")
+
+    def _on_table_select(self, _event=None):
+        sel_tables = self.selected_tables()
+        if sel_tables:
+            self._auto_model(sel_tables)
+        self._refresh_cheats()
 
     def _set_progress(self, frac, text):
         self.pbar["value"] = max(0.0, min(1.0, frac)) * 1000
@@ -398,6 +618,7 @@ class App(tk.Tk):
         sel_tables = self.selected_tables()
         if sel_tables:
             self._auto_model(sel_tables)
+        self._refresh_cheats()
 
     def selected_tables(self):
         return {self.tbl_list.get(i): self.all_tables[self.tbl_list.get(i)] for i in self.tbl_list.curselection()}
@@ -417,6 +638,8 @@ class App(tk.Tk):
             self.canvas.delete("all")
             self.guide_txt.delete("1.0", "end")
             self.model_lbl.config(text="")
+        self._refresh_cheats()
+
 
     def preview(self):
         sel = self.tbl_list.curselection()

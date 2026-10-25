@@ -462,9 +462,14 @@ def build_facts(tables, tree, question, max_chars=9000):
 
 
 def _ttype(s):
+    col_name = str(s.name) if hasattr(s, "name") else ""
+    if _is_date_series(s):
+        return "Dimension (date)"
     if pd.api.types.is_numeric_dtype(s):
-        return "number"
-    return "date" if _is_date_series(s) else "text"
+        if relationship_engine.is_key_name(col_name) or (relationship_engine.tokenize(col_name) & _NON_MEASURE_WORDS):
+            return "Dimension (ID/numeric)"
+        return "Measure (number)"
+    return "Dimension (text)"
 
 
 # --------------------------------------------------------------------------
