@@ -11,6 +11,8 @@ build/
 dist/
 app/
 *.manifest
+*.exe
+
 
 # Installer / Packaging
 *.pkg
