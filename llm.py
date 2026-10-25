@@ -1,11 +1,51 @@
 """Talks to a local LM Studio (OpenAI-compatible) server. Standard library only."""
 import json
+import re
 import threading
 import time
 import urllib.error
 import urllib.request
+import pandas as pd
 
 AUTO = "auto-detect model"
+
+SCHEMA_SYSTEM = (
+    "You are an expert Data Architect, Database Modeler, and Tableau Certified Data Specialist.\n"
+    "Your objective is to analyze the user's opened files and data tables to design the correct Tableau Logical Data Model (Schema) with complete business logic.\n\n"
+    "REQUIRED OUTPUT STRUCTURE (Follow this structure strictly):\n\n"
+    "### 1. TABLE ROLES & BUSINESS GRAIN\n"
+    "For each table/sheet:\n"
+    "* **[Table Name]**: [Fact / Dimension / Lookup / Bridge / Union Candidate]\n"
+    "  * **Grain**: What exactly 1 record (row) represents.\n"
+    "  * **Primary Key**: The column(s) that uniquely identify each record.\n\n"
+    "### 2. LOGICAL RELATIONSHIPS & BUSINESS LOGIC\n"
+    "For each relationship between tables:\n"
+    "* **[Table A] <---> [Table B]**\n"
+    "  * **Relating Fields**: `[Table A].[Field A]` = `[Table B].[Field B]`\n"
+    "  * **Cardinality**: Many-to-One (N:1), One-to-Many (1:N), One-to-One (1:1), or Many-to-Many (N:M)\n"
+    "  * **Business Logic**: Explain WHY these tables connect in the real world and what business questions this relationship answers.\n"
+    "  * **Tableau Model**: Recommend whether to use Tableau Logical Relationship (noodles, default) or Physical Join/Union.\n\n"
+    "### 3. STEP-BY-STEP TABLEAU CANVAS DRAG GUIDE\n"
+    "1. Drag `[Primary Fact/Transaction Table]` onto the canvas first as the base.\n"
+    "2. Drag `[Next Table]` to the right of `[Table]` to create a relationship noodle. Set relationship field: `[Field]` = `[Field]`.\n"
+    "3. [Continue numbered steps for all tables in logical dependency order].\n\n"
+    "### 4. DATA MODELING & EXAM ADVICE\n"
+    "* [Key advice on preventing duplicate rows, managing different grains, handling missing keys, or table calculation considerations]\n\n"
+    "### 5. STRUCTURED SCHEMA DEFINITION\n"
+    "Provide the relationship graph in this exact JSON format so the application canvas can render it:\n"
+    "```json\n"
+    "[\n"
+    "  {\n"
+    "    \"Table A\": \"...\",\n"
+    "    \"Field A\": \"...\",\n"
+    "    \"Table B\": \"...\",\n"
+    "    \"Field B\": \"...\",\n"
+    "    \"Cardinality\": \"MANY-to-ONE\",\n"
+    "    \"Reason\": \"...\"\n"
+    "  }\n"
+    "]\n"
+    "```\n"
+)
 
 SYSTEM = (
     "You are an elite, concise Tableau Practical Exam Assistant.\n"
@@ -66,6 +106,164 @@ def build_prompt(question, facts):
         "### CALCULATED FIELD\n"
         "### EXAM TIP"
     )
+
+
+def build_schema_prompt(tables, analysis=None):
+    """Build a comprehensive architectural prompt describing all opened tables, types, and data samples."""
+    lines = [
+        "ANALYZE THE FOLLOWING OPENED FILES AND BUILD THE OPTIMAL TABLEAU LOGICAL DATA MODEL (SCHEMA) WITH BUSINESS LOGICS.\n"
+    ]
+    for tname, df in tables.items():
+        lines.append(f"=== TABLE: {tname} ({len(df):,} rows, {len(df.columns)} columns) ===")
+        col_desc = []
+        for c in df.columns:
+            s = df[c]
+            nn = s.dropna()
+            uniq = nn.nunique()
+            uniq_pct = (uniq / len(nn) * 100) if len(nn) > 0 else 0
+
+            # infer type
+            is_num = pd.api.types.is_numeric_dtype(s)
+            is_date = pd.api.types.is_datetime64_any_dtype(s) or any(w in str(c).lower() for w in ("date", "time", "year", "month", "day"))
+            if is_date:
+                col_type = "Dimension (date)"
+            elif is_num and (uniq_pct > 80 or any(w in str(c).lower() for w in ("id", "key", "code", "num", "no", "pk", "fk"))):
+                col_type = "Dimension (ID/numeric)"
+            elif is_num:
+                col_type = "Measure (number)"
+            else:
+                col_type = "Dimension (text)"
+
+            samples = [str(v) for v in nn.unique()[:4]]
+            sample_str = ", ".join(f"'{val[:30]}'" for val in samples)
+            extra = ""
+            if uniq_pct == 100 and len(nn) > 0:
+                extra = " [100% Unique - Primary Key Candidate]"
+            elif uniq_pct > 90 and len(nn) > 0:
+                extra = f" [{uniq_pct:.0f}% Unique]"
+            col_desc.append(f"  * [{c}] - {col_type} - {uniq:,} unique values{extra} - Samples: [{sample_str}]")
+        lines.append("\n".join(col_desc))
+
+        if len(df) > 0:
+            sample_rows = df.head(2).to_dict(orient="records")
+            lines.append("  Sample Rows:")
+            for r in sample_rows:
+                short_r = {str(k): (str(v)[:30] if pd.notna(v) else "null") for k, v in list(r.items())[:8]}
+                lines.append(f"    {short_r}")
+        lines.append("")
+
+    if analysis:
+        pairs = analysis.get("pairs", [])
+        if pairs:
+            lines.append("HEURISTIC CANDIDATE RELATIONSHIPS (Detected from column names and value overlaps):")
+            for p in pairs[:8]:
+                lines.append(f"  * {p.get('Table A')}.[{p.get('Field A')}] <-> {p.get('Table B')}.[{p.get('Field B')}] (Overlap: {p.get('Overlap', 0):.0%}, Suggested Cardinality: {p.get('Cardinality', 'Unknown')})")
+            lines.append("")
+        unions = analysis.get("union_candidates", {})
+        if unions:
+            lines.append("HEURISTIC UNION CANDIDATES (Same schema / structure):")
+            for child, parent in unions.items():
+                lines.append(f"  * {child} appears to be appended rows of {parent}")
+            lines.append("")
+
+    lines.append(
+        "TASK:\n"
+        "1. Identify the core Fact/Transaction table vs Dimension/Lookup tables.\n"
+        "2. Define the logical relationships with exact join/relationship keys.\n"
+        "3. Detail the real-world Business Logic explaining WHY these tables connect and what business insights they produce.\n"
+        "4. Provide step-by-step instructions for the Tableau Data Source canvas (drag-and-drop order).\n"
+        "5. Include a structured JSON array at the end inside ```json ... ``` with the exact relationship definitions."
+    )
+    return "\n".join(lines)
+
+
+def extract_schema_model(text, tables):
+    """Extract and validate structured schema relationship tree from AI response."""
+    if not text or not tables:
+        return []
+
+    patterns = [
+        r"```(?:json)?\s*(\[\s*\{.*?\}\s*\])\s*```",
+        r"(\[\s*\{[\s\S]*?\}\s*\])"
+    ]
+    raw_json = None
+    for pat in patterns:
+        m = re.search(pat, text, re.DOTALL)
+        if m:
+            raw_json = m.group(1).strip()
+            break
+
+    if not raw_json:
+        return []
+
+    try:
+        data = json.loads(raw_json)
+        if not isinstance(data, list):
+            return []
+    except Exception:
+        return []
+
+    tbl_lookup = {t.lower(): t for t in tables}
+    tree = []
+    seen_pairs = set()
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        t_a_raw = str(item.get("Table A") or item.get("table_a") or item.get("from_table") or "").strip()
+        t_b_raw = str(item.get("Table B") or item.get("table_b") or item.get("to_table") or "").strip()
+        f_a_raw = str(item.get("Field A") or item.get("field_a") or item.get("from_field") or "").strip().strip("[]`'\"")
+        f_b_raw = str(item.get("Field B") or item.get("field_b") or item.get("to_field") or "").strip().strip("[]`'\"")
+
+        t_a = tbl_lookup.get(t_a_raw.lower())
+        t_b = tbl_lookup.get(t_b_raw.lower())
+        if not t_a or not t_b or t_a == t_b:
+            continue
+
+        pair_key = frozenset((t_a, t_b))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+
+        cols_a = {str(c).lower(): str(c) for c in tables[t_a].columns}
+        cols_b = {str(c).lower(): str(c) for c in tables[t_b].columns}
+
+        f_a = cols_a.get(f_a_raw.lower())
+        f_b = cols_b.get(f_b_raw.lower())
+        if not f_a or not f_b:
+            continue
+
+        card_raw = str(item.get("Cardinality") or item.get("cardinality") or "MANY-to-ONE").upper()
+        if "1:M" in card_raw or "ONE-TO-MANY" in card_raw:
+            card = "ONE-to-MANY"
+            many_side = t_b
+        elif "1:1" in card_raw or "ONE-TO-ONE" in card_raw:
+            card = "ONE-to-ONE"
+            many_side = t_a
+        elif "M:M" in card_raw or "MANY-TO-MANY" in card_raw:
+            card = "MANY-to-MANY"
+            many_side = t_a
+        else:
+            card = "MANY-to-ONE"
+            many_side = t_a
+
+        tree.append({
+            "Table A": t_a,
+            "Field A": f_a,
+            "Fields A": [f_a],
+            "Table B": t_b,
+            "Field B": f_b,
+            "Fields B": [f_b],
+            "Cardinality": card,
+            "MANY side": many_side,
+            "Status": "Confirmed",
+            "Confidence": 0.95,
+            "is_composite": False,
+            "Overlap": 1.0,
+            "Reason": str(item.get("Reason") or item.get("reason") or "AI verified relationship"),
+        })
+
+    return tree
 
 
 def _url(base, path):

@@ -92,6 +92,8 @@ class App(tk.Tk):
         self.stopped = False
         self.last_facts = ""
         self.cfg = load_cfg()
+        self.ai_schema_guide = ""
+        self.rule_schema_guide = ""
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._drain)
@@ -156,7 +158,10 @@ class App(tk.Tk):
         nb.add(f, text="1. Data model")
         top = ttk.Frame(f)
         top.pack(fill="x")
-        ttk.Button(top, text="Generate schema & drag guide", command=self.generate_schema).pack(side="left")
+        self.btn_ai_schema = ttk.Button(top, text="🤖 Generate Schema & Logic (AI)", command=self.generate_schema)
+        self.btn_ai_schema.pack(side="left")
+        self.btn_rule_schema = ttk.Button(top, text="⚡ Fast Rule-Based Schema", command=self.generate_rule_schema)
+        self.btn_rule_schema.pack(side="left", padx=4)
         ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=8, pady=2)
         ttk.Button(top, text="Fit to Screen", command=self.fit_to_screen).pack(side="left", padx=2)
         ttk.Button(top, text="Zoom In (+)", width=11, command=self.zoom_in).pack(side="left", padx=2)
@@ -190,8 +195,10 @@ class App(tk.Tk):
         self.guide_txt.pack(fill="both", expand=True)
         bf = ttk.Frame(gf)
         bf.pack(fill="x", pady=(6, 0))
-        ttk.Button(bf, text="Copy guide", command=lambda: self._copy(self.guide_txt.get("1.0", "end").strip())).pack(side="left")
-        ttk.Button(bf, text="Save guide...", command=lambda: self._save_text(self.guide_txt.get("1.0", "end"), "tableau_guide.txt")).pack(side="left", padx=6)
+        ttk.Button(bf, text="📋 Copy Guide", command=lambda: self._copy(self.guide_txt.get("1.0", "end").strip())).pack(side="left")
+        ttk.Button(bf, text="💾 Save Guide...", command=lambda: self._save_text(self.guide_txt.get("1.0", "end"), "tableau_schema_guide.txt")).pack(side="left", padx=4)
+        ttk.Button(bf, text="🤖 Run AI Schema", command=self.generate_schema).pack(side="left", padx=4)
+        ttk.Button(bf, text="⚡ View Rule-Based Guide", command=self.show_rule_guide).pack(side="left", padx=4)
 
     def _tab_ask(self, nb):
         f = ttk.Frame(nb, padding=10)
@@ -618,6 +625,10 @@ class App(tk.Tk):
         sel_tables = self.selected_tables()
         if sel_tables:
             self._auto_model(sel_tables)
+            self.model_lbl.config(
+                text=f"{len(sel_tables)} table(s) loaded. Click '🤖 Generate Schema & Logic (AI)' to analyze with AI model.",
+                foreground="#1d4ed8"
+            )
         self._refresh_cheats()
 
     def selected_tables(self):
@@ -755,20 +766,126 @@ class App(tk.Tk):
         return self.model_cache["pairs"], self.model_cache["tree"]
 
     def generate_schema(self):
+        """Send opened files to local AI model and generate the correct Tableau schema with business logic."""
         tables = self.selected_tables()
         if not tables:
             messagebox.showinfo(APP_NAME, "Add files and select at least one table first.")
             return
-        self.model_lbl.config(text="Working...")
+        self._save_cfg()
+        cfg = dict(self.cfg)
+        if hasattr(self, "btn_ai_schema"):
+            self.btn_ai_schema.config(state="disabled")
+        self.model_lbl.config(text=f"🤖 Step 1/3 - Profiling {len(tables)} opened table(s)...", foreground="#1d4ed8")
+
+        def work():
+            try:
+                # 1. Quick rule-based pass to obtain baseline profiles and hints
+                pairs, base_tree = self._ensure_model(tables)
+                analysis = self.model_cache.get("analysis", {})
+
+                # 2. Package prompt from all opened files
+                self.post(lambda: self.model_lbl.config(
+                    text=f"🤖 Step 2/3 - Sending opened files to AI ({cfg.get('base_url', 'LM Studio')})...",
+                    foreground="#1d4ed8"
+                ))
+                prompt = llm.build_schema_prompt(tables, analysis)
+                messages = [
+                    {"role": "system", "content": llm.SCHEMA_SYSTEM},
+                    {"role": "user", "content": prompt}
+                ]
+
+                # 3. Model detection
+                model = llm.choose_model(cfg["base_url"], cfg["api_key"], cfg["model"])
+                self.post(lambda: self.model_lbl.config(
+                    text=f"🤖 Step 3/3 - AI ({model}) analyzing schema & business logic...",
+                    foreground="#1d4ed8"
+                ))
+
+                # 4. Stream from AI model
+                limit = max(cfg.get("max_tokens", 1800), 2500)
+                state = llm.start(messages, cfg["base_url"], cfg["api_key"], model, limit, cfg["timeout"])
+                while not state["done"]:
+                    toks = state["tokens"]
+                    el = time.time() - state["t_start"]
+                    self.post(lambda t=toks, e=el: self.model_lbl.config(
+                        text=f"🤖 AI generating schema & business logic ({t} tokens, {e:.0f}s)...",
+                        foreground="#1d4ed8"
+                    ))
+                    time.sleep(0.3)
+
+                if state["error"]:
+                    raise RuntimeError(state["error"])
+
+                ai_text = state["content"].strip()
+                if not ai_text:
+                    raise RuntimeError("AI model returned an empty response. Try raising Max output tokens in Settings.")
+
+                # 5. Extract structured relationships from AI response
+                ai_tree = llm.extract_schema_model(ai_text, tables)
+                final_tree = ai_tree if ai_tree else base_tree
+
+                # 6. Apply to UI
+                def on_done():
+                    if hasattr(self, "btn_ai_schema"):
+                        self.btn_ai_schema.config(state="normal")
+                    self.ai_schema_guide = ai_text
+                    self._show_model(tables, pairs, final_tree, custom_guide=ai_text)
+                    if ai_tree:
+                        note = f"✓ AI Schema applied ({len(ai_tree)} relationships via {model})"
+                    else:
+                        note = f"✓ AI Business Logic generated via {model}"
+                    self.model_lbl.config(text=note, foreground="#15803d")
+
+                self.post(on_done)
+
+            except Exception as e:
+                err_msg = str(e)
+                # Graceful fallback to rule-based schema
+                def on_fail():
+                    if hasattr(self, "btn_ai_schema"):
+                        self.btn_ai_schema.config(state="normal")
+                    try:
+                        pairs, base_tree = self._ensure_model(tables)
+                        self._show_model(tables, pairs, base_tree)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    low = err_msg.lower()
+                    if "connection" in low or "refused" in low or "http" in low:
+                        note = "LM Studio not running on localhost:1234 — rule-based schema generated. (Start LM Studio for AI logic)."
+                    else:
+                        note = f"AI Schema note: {err_msg[:120]} (Showing rule-based schema)."
+                    self.model_lbl.config(text=note, foreground="#b45309")
+
+                self.post(on_fail)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def generate_rule_schema(self):
+        """Build instant rule-based schema and relationship graph without calling the LLM."""
+        tables = self.selected_tables()
+        if not tables:
+            messagebox.showinfo(APP_NAME, "Add files and select at least one table first.")
+            return
+        self.model_lbl.config(text="Building rule-based schema...", foreground="#555")
 
         def work():
             try:
                 pairs, tree = self._ensure_model(tables)
                 self.post(lambda: self._show_model(tables, pairs, tree))
+                self.post(lambda: self.model_lbl.config(text=f"Rule-based schema: {len(tree)} relationship(s) found.", foreground="#15803d"))
             except Exception as e:  # noqa: BLE001
                 msg = str(e)
-                self.post(lambda: self.model_lbl.config(text=f"Problem: {msg}"))
+                self.post(lambda: self.model_lbl.config(text=f"Problem: {msg}", foreground="#b00020"))
         threading.Thread(target=work, daemon=True).start()
+
+    def show_rule_guide(self):
+        """Switch drag guide back to the rule-based guide text."""
+        if hasattr(self, "rule_schema_guide") and self.rule_schema_guide:
+            self.guide_txt.delete("1.0", "end")
+            self.guide_txt.insert("1.0", self.rule_schema_guide)
+            self.model_lbl.config(text="Showing rule-based schema guide.", foreground="#555")
+        else:
+            messagebox.showinfo(APP_NAME, "No rule-based guide generated yet.")
 
     # ------------------------------------------------------------------ zoom & view controls
     def fit_to_screen(self):
@@ -849,12 +966,14 @@ class App(tk.Tk):
         if self.is_fit_mode and self.current_model and self.current_model[0]:
             self.after_idle(self.fit_to_screen)
 
-    def _show_model(self, tables, pairs, tree):
+    def _show_model(self, tables, pairs, tree, custom_guide=None):
         self.current_model = (tables, tree)
         analysis = self.model_cache.get("analysis", {})
         disconnected = analysis.get("disconnected", {})
         junction_tables = analysis.get("junction_tables", {})
-        guide = engine.guide_text(tree, disconnected, junction_tables) if len(tables) > 1 else "Only one table selected. No relationship is needed."
+        rule_guide = engine.guide_text(tree, disconnected, junction_tables) if len(tables) > 1 else "Only one table selected. No relationship is needed."
+        self.rule_schema_guide = rule_guide
+        guide = custom_guide if custom_guide else (self.ai_schema_guide if self.ai_schema_guide else rule_guide)
         self.guide_txt.delete("1.0", "end")
         self.guide_txt.insert("1.0", guide)
 

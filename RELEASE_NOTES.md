@@ -35,10 +35,14 @@ Tableau Offline AI is an offline AI assistant, practical exam guide, and schema 
 - Filters out bottom summary/total rows to avoid skewing sums and aggregations.
 - Auto-derives essential business metrics like `Total Sales = quantity * unit_price` when missing.
 
-#### 4. Relational Schema Modeling
-- Automatically identifies primary keys and foreign keys across all loaded sheets.
-- Generates loop-free relationship tree diagrams matching Tableau's logical data model.
-- Provides copyable drag-and-drop relationship mapping instructions.
+#### 4. AI-Powered Schema & Business Logic Builder
+- **Direct AI File Analysis via Button**:
+  - Click **`🤖 Generate Schema & Logic (AI)`** to send opened CSV/Excel files (with column specifications, data types, distinct sample values, and candidate keys) to the local AI model.
+  - Automatically classifies **Table Roles & Grain** (Fact/Transaction, Dimension, Lookup, Bridge, or Union candidate).
+  - Determines exact **Logical Relationships** with in-depth real-world **Business Logic** explaining why tables connect.
+  - Generates step-by-step **Tableau Data Source Canvas Drag Guides** in logical dependency order.
+  - Automatically updates the visual canvas diagram based on the AI's verified relationship schema.
+  - Includes fast offline **`⚡ Fast Rule-Based Schema`** button and toggleable rule-based drag guide.
 
 #### 5. Exact Fact Verification & 100% Offline Privacy
 - Runs mathematical computations and aggregations in `pandas` first to ensure 0% hallucination.

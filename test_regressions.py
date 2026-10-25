@@ -130,6 +130,68 @@ class TestRegressions(unittest.TestCase):
         self.assertIn("### CALCULATED FIELD", p)
         self.assertIn("### EXAM TIP", p)
 
+    def test_ai_schema_prompt_and_extraction(self):
+        import llm
+        orders = pd.DataFrame({
+            "Order ID": ["CA-100", "CA-101", "CA-102"],
+            "Customer ID": ["C-1", "C-2", "C-1"],
+            "Sales": [120.5, 45.0, 310.2],
+            "Order Date": ["2023-01-01", "2023-01-02", "2023-01-03"],
+        })
+        customers = pd.DataFrame({
+            "Customer ID": ["C-1", "C-2", "C-3"],
+            "Customer Name": ["Alice", "Bob", "Charlie"],
+            "Segment": ["Consumer", "Corporate", "Home Office"],
+        })
+        tables = {"Orders": orders, "Customers": customers}
+        
+        # 1. Test Prompt Building
+        prompt = llm.build_schema_prompt(tables)
+        self.assertIn("TABLE: Orders", prompt)
+        self.assertIn("TABLE: Customers", prompt)
+        self.assertIn("[Order ID]", prompt)
+        self.assertIn("[Customer ID]", prompt)
+        self.assertIn("Primary Key Candidate", prompt)
+        self.assertIn("Samples:", prompt)
+        self.assertIn("```json", prompt)
+
+        # 2. Test Model Extraction from AI response
+        ai_response = (
+            "### 1. TABLE ROLES & BUSINESS GRAIN\n"
+            "* **Orders**: Fact table of transactions. Grain: 1 line per order item.\n"
+            "* **Customers**: Dimension table. Grain: 1 row per unique customer.\n\n"
+            "### 2. LOGICAL RELATIONSHIPS & BUSINESS LOGIC\n"
+            "* **Orders <---> Customers**\n"
+            "  * Relating Fields: Orders.[Customer ID] = Customers.[Customer ID]\n"
+            "  * Business Logic: Links sales transactions to customer demographic attributes.\n\n"
+            "### 5. STRUCTURED SCHEMA DEFINITION\n"
+            "```json\n"
+            "[\n"
+            "  {\n"
+            "    \"Table A\": \"Orders\",\n"
+            "    \"Field A\": \"[Customer ID]\",\n"
+            "    \"Table B\": \"Customers\",\n"
+            "    \"Field B\": \"[Customer ID]\",\n"
+            "    \"Cardinality\": \"MANY-to-ONE\",\n"
+            "    \"Reason\": \"Orders link to customer master\"\n"
+            "  }\n"
+            "]\n"
+            "```\n"
+        )
+        tree = llm.extract_schema_model(ai_response, tables)
+        self.assertEqual(len(tree), 1)
+        self.assertEqual(tree[0]["Table A"], "Orders")
+        self.assertEqual(tree[0]["Field A"], "Customer ID")
+        self.assertEqual(tree[0]["Table B"], "Customers")
+        self.assertEqual(tree[0]["Field B"], "Customer ID")
+        self.assertEqual(tree[0]["Cardinality"], "MANY-to-ONE")
+        self.assertEqual(tree[0]["MANY side"], "Orders")
+        self.assertEqual(tree[0]["Status"], "Confirmed")
+
+        # 3. Test malformed response returns empty list safely
+        self.assertEqual(llm.extract_schema_model("No schema here", tables), [])
+        self.assertEqual(llm.extract_schema_model("```json\n{not a list}\n```", tables), [])
+
 
 if __name__ == "__main__":
     unittest.main()
